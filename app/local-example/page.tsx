@@ -25,10 +25,10 @@ const nextEntries = [...guides, ...examples, ...reference].filter((entry) =>
 const CELL_CODE =
   "[&_code]:rounded [&_code]:bg-neutral-200 [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em] [&_code]:text-neutral-800 dark:[&_code]:bg-neutral-800 dark:[&_code]:text-neutral-200";
 
-const buildLibrary = `# The example resolves the library through file:../../react-observer-agent,
-# so it reads dist/ from a sibling checkout of the library repo.
-cd ../react-observer-agent
-npm install && npm run build`;
+const buildLibrary = `# Only needed to smoke test an unreleased change. Build the library,
+# then point the example at that checkout instead of the published package.
+cd ../../react-observer-agent && npm install && npm run build
+cd - && npm install ../../react-observer-agent`;
 
 const runExample = `cd local-example
 npm install
@@ -152,16 +152,21 @@ export default function LocalExamplePage() {
       <Section title="Setup">
         <Prose>
           <p>
-            The example depends on the library through a <code>file:</code>{" "}
-            specifier, which reads the built <code>dist/</code> rather than the
-            source. Build the library once first.
+            The example installs <code>react-observer-agent</code> from npm, so
+            there is nothing to check out first. From the root of this
+            repository:
+          </p>
+        </Prose>
+        <CodeBlock code={runExample} lang="bash" />
+        <Prose>
+          <p>
+            To smoke test a change to the library that is not released yet,
+            point the example at a local checkout instead. A <code>file:</code>{" "}
+            specifier reads the built <code>dist/</code> rather than the source,
+            so the library has to be built first.
           </p>
         </Prose>
         <CodeBlock code={buildLibrary} lang="bash" />
-        <Prose>
-          <p>Then, from the root of this repository:</p>
-        </Prose>
-        <CodeBlock code={runExample} lang="bash" />
         <Prose>
           <p>
             Put a key in <code>.env</code> for whichever provider you are

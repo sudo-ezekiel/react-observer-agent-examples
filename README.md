@@ -34,26 +34,20 @@ npm install
 npm run dev
 ```
 
-The site depends on the library through `file:../react-observer-agent`, so a
-sibling checkout of the library repository is required while the package is
-unpublished. Build it once before installing here, since the `file:` specifier
-resolves to `dist/`:
+The site depends on the published `react-observer-agent` package, so nothing
+else needs to be checked out.
+
+To try an unreleased change to the library, point the dependency at a local
+checkout instead:
 
 ```bash
-cd ../react-observer-agent && npm install && npm run build
+npm install ../react-observer-agent
 ```
 
-Once the package is on npm, that dependency becomes a normal version range and
-the sibling checkout stops being necessary.
-
-`npm run dev` runs Next on webpack rather than Turbopack. Turbopack resolves the
-symlink behind a `file:` dependency to its real path, which sits outside this
-project, and then fails to resolve the package at all. `next build` uses webpack
-and is unaffected, so this only ever showed up in the dev server. The flag can go
-back once the dependency is a published version range rather than a symlink.
-
-Once the package is on npm that dependency becomes an ordinary version range and
-the sibling checkout stops being necessary.
+Build the library first, since a `file:` specifier resolves to its `dist/`. Run
+`npm run dev` without `--turbopack` while that is in place: Turbopack resolves
+the symlink behind a `file:` dependency to a path outside this project and then
+cannot find the package. `next build` uses webpack and is unaffected.
 
 ## Adding a page
 

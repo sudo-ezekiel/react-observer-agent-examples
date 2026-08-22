@@ -4,16 +4,17 @@ A small shopping app wired to `react-observer-agent`, used as the live smoke tes
 
 ## Setup
 
-This app depends on the library via `file:../../react-observer-agent`, so it reads `dist/` from a sibling checkout. Clone [react-observer-agent](https://github.com/sudo-ezekiel/react-observer-agent) next to this repository and build it once:
+This app installs `react-observer-agent` from npm, so nothing else needs to be checked out:
 
 ```bash
-cd ../react-observer-agent && npm install && npm run build
+cd local-example && npm install && cp .env.example .env
 ```
 
-Then install and configure this app:
+To smoke test an unreleased change to the library, build a local checkout and point this app at it instead:
 
 ```bash
-cd react-observer-agent-examples/local-example && npm install && cp .env.example .env
+cd ../../react-observer-agent && npm install && npm run build
+cd - && npm install ../../react-observer-agent
 ```
 
 Put a key in `.env` for whichever provider you are testing. The dev server reads it in Node and attaches it to proxied requests, so it never reaches the browser bundle. To use Claude, also set `VITE_PROVIDER=claude`.
