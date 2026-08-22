@@ -1,0 +1,34 @@
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "reactobserveragent-docs",
+  "compatibility_date": "2026-08-22",
+
+  // ONE DEDICATED HOST ON THE PERSONAL ZONE.
+  //
+  // sudo-ezekiel.com serves the personal site at its apex, and other projects
+  // already claim paths on it. This Worker claims neither, so the docs live on
+  // their own hostname and cannot collide with anything else.
+  //
+  // `custom_domain: true` rather than a bare route pattern, because it also
+  // provisions the proxied DNS record and the edge certificate; a route with no
+  // DNS record behind it resolves nowhere. Exactly one subdomain level is
+  // deliberate: Universal SSL covers `*.sudo-ezekiel.com` but NOT
+  // `a.b.sudo-ezekiel.com`, which would need the paid Advanced Certificate
+  // Manager. Same reasoning as renderwave-docs.
+  "routes": [
+    { "pattern": "reactobserveragent.sudo-ezekiel.com", "custom_domain": true }
+  ],
+
+  // Assets-only Worker, no script. `next build` with output: "export" writes the
+  // whole site to out/, and trailingSlash: true means every route is a
+  // directory with its own index.html, so the full request path resolves
+  // one-to-one with no rewrite rules to maintain.
+  "assets": {
+    "directory": "./out",
+    "not_found_handling": "404-page"
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}
