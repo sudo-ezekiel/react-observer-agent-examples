@@ -1,4 +1,10 @@
-import { AIAgentProvider, claudeAdapter, openAIAdapter } from 'react-observer-agent';
+import { useState } from 'react';
+import {
+  AIAgentProvider,
+  claudeAdapter,
+  openAIAdapter,
+  type AgentError,
+} from 'react-observer-agent';
 import { useAppStore } from './store';
 import { tools } from './tools';
 import { ChatPanel } from './ChatPanel';
@@ -18,6 +24,8 @@ const model =
 const getAppState = () => useAppStore.getState();
 
 export default function App() {
+  const [lastError, setLastError] = useState<AgentError | null>(null);
+
   return (
     <div style={{ padding: 24, fontFamily: 'system-ui, sans-serif' }}>
       <h1>react-observer-agent: basic example</h1>
@@ -27,13 +35,50 @@ export default function App() {
         <strong>{provider}</strong>
       </p>
 
+      {lastError && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 12,
+            marginBottom: 16,
+            padding: '10px 14px',
+            borderRadius: 8,
+            border: '1px solid #f0b4b4',
+            background: '#fdecec',
+            color: '#8a1f1f',
+            fontSize: 14,
+          }}
+        >
+          <span style={{ flex: 1 }}>
+            <strong>{lastError.code ?? 'Error'}</strong>
+            {lastError.status ? ` (HTTP ${lastError.status})` : ''}:{' '}
+            {lastError.message}
+          </span>
+          <button
+            type="button"
+            onClick={() => setLastError(null)}
+            style={{
+              border: 'none',
+              background: 'transparent',
+              color: 'inherit',
+              cursor: 'pointer',
+              fontSize: 13,
+              textDecoration: 'underline',
+            }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <AIAgentProvider
         model={model}
         state={getAppState}
         tools={tools}
         permissions={{
           canAccess: ['user', 'currentPage', 'cart', 'products'],
-          canExecute: ['navigateTo', 'addToCart', 'clearCart'],
+          canExecute: ['navigateTo', 'addToCart', 'checkStock', 'clearCart'],
           stateDescriptions: {
             user: 'Current logged-in user profile (name, email)',
             currentPage: 'The page the user is currently viewing',
@@ -44,7 +89,11 @@ export default function App() {
         options={{
           debug: true,
           systemPrompt:
-            'You are a helpful shopping assistant. You can navigate the app, add products to the cart, and clear the cart. Use readState to check available products before answering questions.',
+            'You are a helpful shopping assistant. You can navigate the app, add products to the cart, check stock, and clear the cart. Use readState to check available products before answering questions.',
+          // The failed turn is also in history with its error attached, which
+          // ChatPanel renders in place. This is the app-level copy, where a real
+          // app would log or report. A cancel never arrives here.
+          onError: (error) => setLastError(error),
           onConfirm: async (pending) => {
             return window.confirm(
               `Allow "${pending.toolName}" with args ${JSON.stringify(pending.args)}?`,

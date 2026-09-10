@@ -2,7 +2,7 @@
 
 import { useMemo, useSyncExternalStore } from "react";
 import { registerTool } from "react-observer-agent";
-import type { AnyToolDefinition } from "react-observer-agent";
+import type { AnyToolDefinition, ToolContext } from "react-observer-agent";
 
 /**
  * The tiny shop every demo on this site runs against.
@@ -121,11 +121,29 @@ export const STATE_DESCRIPTIONS: Record<string, string> = {
   currentPage: "The route the shopper is looking at",
 };
 
+export type CreateToolsOptions = {
+  /**
+   * How long `addToCart` pretends to work before it touches the store. Zero,
+   * the default, keeps every other demo instant; a page that wants to show a
+   * cancel landing on a running handler raises it so there is time to press it.
+   */
+  addToCartDelayMs?: number;
+};
+
 /**
  * The tool set the demos register. `confirm` is on `clearCart` because it
  * destroys work the shopper did, which is the rule of thumb the docs give.
+ *
+ * `addToCart` is the one handler written against the v0.3.0 two-argument
+ * signature. It forwards `context.signal` into its wait, so a cancel ends the
+ * call rather than leaving it to finish and have its result thrown away.
  */
-export function createTools(store: ShopStore): AnyToolDefinition[] {
+export function createTools(
+  store: ShopStore,
+  options: CreateToolsOptions = {}
+): AnyToolDefinition[] {
+  const { addToCartDelayMs = 0 } = options;
+
   return [
     registerTool("navigateTo", (args: { path: string }) => store.navigateTo(args.path), {
       description: "Navigate the shopper to a page in the app",
@@ -139,7 +157,10 @@ export function createTools(store: ShopStore): AnyToolDefinition[] {
     }),
     registerTool(
       "addToCart",
-      (args: { productId: string }) => store.addToCart(args.productId),
+      async (args: { productId: string }, context?: ToolContext) => {
+        await work(addToCartDelayMs, context?.signal);
+        return store.addToCart(args.productId);
+      },
       {
         description: "Add one unit of a product to the cart by its id",
         parameters: {
@@ -159,4 +180,38 @@ export function createTools(store: ShopStore): AnyToolDefinition[] {
       confirm: true,
     }),
   ];
+}
+
+/**
+ * Stands in for the slow part of a real handler, a fetch or a write.
+ *
+ * It rejects with an AbortError rather than resolving early, because that is
+ * the name the loop reads as a cancelled tool call instead of a failed one, and
+ * the same shape `fetch` produces when a signal it was given fires.
+ */
+function work(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+
+    function onAbort() {
+      clearTimeout(timer);
+      reject(abortError());
+    }
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function abortError(): Error {
+  const error = new Error("The operation was aborted");
+  error.name = "AbortError";
+  return error;
 }

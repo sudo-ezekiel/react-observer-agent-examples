@@ -14,7 +14,7 @@ import { examples, reference } from "@/lib/site";
 export const metadata: Metadata = {
   title: "How send() behaves",
   description:
-    "The turn loop, conversation replay, cancellation, the turn budget, token usage, and the five tool call statuses.",
+    "Queued calls, the turn loop, conversation replay, cancellation, the turn budget, typed error codes, token usage, and the five tool call statuses.",
 };
 
 const nextUp = [...examples, ...reference].filter((entry) =>
@@ -49,8 +49,22 @@ const responseCode = `interface AgentResponse {
   message: string;              // the agent's final text
   toolCalls: ToolCallResult[];  // user tools invoked this interaction, all statuses
   error?: AgentError;           // present when the interaction failed or was cancelled
-  usage?: { promptTokens: number; completionTokens: number }; // totalled across turns
+  usage?: TokenUsage;           // totalled across turns
+}
+
+interface TokenUsage {
+  promptTokens: number;         // total input, cached portion included
+  completionTokens: number;
+  cacheReadTokens?: number;     // subsets of promptTokens, present only when
+  cacheWriteTokens?: number;    // the provider reported cache activity
 }`;
+
+const queueCode = `const added = send('Add the blue mug to the cart');
+const checkedOut = send('Now check out');
+
+// checkedOut waits for added, then starts from the transcript it left,
+// so the second message knows what the first one did.
+await Promise.all([added, checkedOut]);`;
 
 const cancelCode = `const controller = new AbortController();
 
@@ -63,6 +77,39 @@ const response = await send('Summarise the catalogue', {
 if (response.error?.code === 'ABORTED') {
   // The user cancelled. onError deliberately did not fire.
 }`;
+
+const errorRows: [string, string, string][] = [
+  [
+    "ABORTED",
+    "The signal fired. The message is empty and whatever toolCalls accumulated before the stop are kept.",
+    "No",
+  ],
+  [
+    "MAX_TURNS",
+    "The turn budget ran out while the model was still calling tools. The message is empty.",
+    "Yes",
+  ],
+  [
+    "ADAPTER_ERROR",
+    "The adapter threw an AdapterError. error.status carries the HTTP status when there was a response, and error.cause the original error.",
+    "Yes",
+  ],
+  [
+    "TRUNCATED",
+    "The model hit its output token limit. error.message reads 'Model output was cut off by the max tokens limit' and the partial answer stays in response.message.",
+    "Yes",
+  ],
+  [
+    "REFUSED",
+    "The model declined to answer, an Anthropic refusal or an OpenAI content filter. error.message reads 'Model declined to answer' and whatever text came back stays in response.message.",
+    "Yes",
+  ],
+  [
+    "(absent)",
+    "Any other exception: a throwing callback, a throwing state getter, or a custom adapter throwing a plain Error.",
+    "Yes",
+  ],
+];
 
 const statusRows: [string, string, string][] = [
   [
@@ -89,7 +136,7 @@ export default function SendBehavior() {
     <div className="mx-auto w-full max-w-3xl">
       <PageHeader
         title="How send() behaves"
-        lead="One send() is a loop of at most maxTurns model round trips, default 5, that ends when the model answers with text instead of another tool call."
+        lead="One send() is a loop of at most maxTurns model round trips, default 5, that ends when the model answers with text instead of another tool call. Concurrent calls queue and run one at a time."
       />
 
       <Section title="The loop">
@@ -110,6 +157,53 @@ export default function SendBehavior() {
           </p>
         </Prose>
         <CodeBlock code={responseCode} lang="ts" />
+      </Section>
+
+      <Section title="One at a time">
+        <Prose>
+          <p>
+            <code>send()</code> calls queue. Concurrent calls run strictly in
+            call order, each waiting for the one ahead of it and starting from
+            the transcript that call left behind, so a follow-up message reasons
+            about what the message before it actually did.
+          </p>
+        </Prose>
+        <CodeBlock code={queueCode} lang="ts" />
+        <Prose>
+          <ul>
+            <li>
+              <strong>History alternates.</strong> The user entry is appended
+              when a queued call starts executing rather than when{" "}
+              <code>send()</code> was called, so <code>history</code> reads
+              user, assistant, user, assistant however the calls were issued.
+            </li>
+            <li>
+              <strong>
+                <code>isProcessing</code> spans the whole queue.
+              </strong>{" "}
+              It goes true on the first <code>send()</code> and false when the
+              last queued call settles, with no flicker back to false between
+              two queued interactions.
+            </li>
+            <li>
+              <strong>One failure does not stall the rest.</strong> The next
+              call runs whatever the interaction ahead of it returned or threw.
+            </li>
+            <li>
+              <strong>A queued call can be cancelled before it runs.</strong> If
+              its signal has already fired by the time its turn comes, it
+              returns <code>ABORTED</code> without calling the model.
+            </li>
+          </ul>
+        </Prose>
+        <Callout tone="note" title="Changed in 0.3.0">
+          Before this, two sends in flight at once both started from the same
+          transcript, the second to finish overwrote the first&apos;s turns, and
+          their history entries interleaved as user, user, assistant, assistant.
+          Code that disables its input while <code>isProcessing</code> keeps
+          working unchanged; code that relied on two sends racing now sees them
+          serialized.
+        </Callout>
       </Section>
 
       <Section title="Conversation memory">
@@ -155,6 +249,15 @@ export default function SendBehavior() {
             interaction, and nothing bounds it across interactions.{" "}
             <code>clearHistory()</code> resets both records, and compaction is
             on the roadmap.
+          </p>
+          <p>
+            Clearing while an interaction is running discards that interaction.
+            When it finishes, nothing it produced lands in <code>history</code>,{" "}
+            <code>lastResponse</code> or the transcript, since the user entry it
+            appended at the start went with the clear and writing the rest back
+            would rebuild half a conversation the user threw away. Its{" "}
+            <code>send()</code> still resolves with the response, and{" "}
+            <code>onError</code> still fires under the usual rules.
           </p>
         </Prose>
       </Section>
@@ -204,6 +307,37 @@ export default function SendBehavior() {
         </Prose>
       </Section>
 
+      <Section title="Error codes">
+        <Prose>
+          <p>
+            <code>error.code</code> is an <code>AgentErrorCode</code>, one of
+            five literals rather than an open string. Every code except{" "}
+            <code>ABORTED</code> reaches <code>onError</code>, and{" "}
+            <code>send()</code> resolves with all of them. The one thing that
+            makes <code>send()</code> reject is <code>onError</code> itself
+            throwing, and by then <code>history</code> and{" "}
+            <code>lastResponse</code> are already written.
+          </p>
+        </Prose>
+        <Table
+          head={["error.code", "Set when", "Reaches onError"]}
+          rows={errorRows.map(([code, meaning, reaches]) => [
+            <code key={code}>{code}</code>,
+            meaning,
+            reaches,
+          ])}
+        />
+        <Prose>
+          <p>
+            <code>TRUNCATED</code> and <code>REFUSED</code> come from the stop
+            reason the provider reported, so a cut-off answer and a declined one
+            are told apart without reading the text.{" "}
+            <code>ADAPTER_ERROR</code> carries the HTTP status, which is what
+            separates a 401 from a 429 without parsing messages.
+          </p>
+        </Prose>
+      </Section>
+
       <Section title="Token usage">
         <Prose>
           <p>
@@ -212,7 +346,25 @@ export default function SendBehavior() {
             them. A three-turn interaction reports one summed figure rather than
             three.
           </p>
+          <p>
+            <code>cacheReadTokens</code> and <code>cacheWriteTokens</code> are
+            subsets of <code>promptTokens</code>, not additions to it, and both
+            are optional: they appear when the provider reported cache activity
+            and are absent otherwise. The Claude adapter has prompt caching on
+            by default, so most Claude interactions carry them; pass{" "}
+            <code>cache: false</code> to the adapter to turn it off.
+          </p>
         </Prose>
+        <Callout
+          tone="warn"
+          title="Claude promptTokens reads higher than it did in 0.2.0"
+        >
+          Anthropic reports cache reads and writes outside{" "}
+          <code>input_tokens</code>, and <code>claudeAdapter</code> now sums all
+          three, so <code>promptTokens</code> means the same thing as
+          OpenAI&apos;s <code>prompt_tokens</code>. Anyone charting Claude usage
+          will see larger numbers for identical traffic.
+        </Callout>
       </Section>
 
       <Section title="Tool call statuses">

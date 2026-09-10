@@ -30,6 +30,10 @@ import type { ShopState } from "@/lib/demo";
  * last entry should be text only, otherwise the loop runs out its turn budget
  * and returns MAX_TURNS (which is exactly what the cancellation and turn budget
  * demos want, so it stays possible on purpose).
+ *
+ * A turn is a ModelResponse, so it can also carry `stopReason`. The loop only
+ * reads that field on a turn with no tool calls, which is why `truncated` and
+ * `refused` below are for the last entry of a plan and nowhere else.
  */
 export type Turn = ModelResponse;
 
@@ -152,4 +156,23 @@ export function callTool(
 /** Convenience for the final, text-only turn that ends an interaction. */
 export function say(content: string): Turn {
   return { content };
+}
+
+/**
+ * A final turn the model was cut off in, which the loop reports as
+ * `error.code: "TRUNCATED"` while keeping the partial text as the message.
+ *
+ * It has to be the last entry of a plan and carry no tool calls, because
+ * `stopReason` is only read on a turn the loop treats as the answer.
+ */
+export function truncated(content: string): Turn {
+  return { content, stopReason: "max_tokens" };
+}
+
+/**
+ * A final turn the model declined to answer, reported as
+ * `error.code: "REFUSED"`. Same placement rule as `truncated`.
+ */
+export function refused(content: string): Turn {
+  return { content, stopReason: "refusal" };
 }

@@ -100,6 +100,12 @@ export default function Home() {
             <li>TypeScript, dual ESM and CJS builds with types included.</li>
             <li>React &gt;= 18 as a peer dependency.</li>
             <li>
+              Both bundles ship a <code>{"'use client'"}</code> banner, so the
+              package imports into a Next.js App Router tree with no wrapper
+              module. Your own files that call <code>useAgent</code> or mount
+              the provider still carry the directive themselves.
+            </li>
+            <li>
               Works with any state manager: Zustand, Redux, vanilla React state.
             </li>
           </ul>

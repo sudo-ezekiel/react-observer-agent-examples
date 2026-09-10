@@ -238,11 +238,11 @@ export default function Permissions() {
           <p>
             Every one of these lands in <code>AgentResponse.toolCalls</code> and
             is fed back to the model so it can react.{" "}
-            <code>onToolCall</code> fires for each of them too, with one edge
-            case: a name that passes <code>canExecute</code> but has no matching
-            tool definition is recorded as <code>denied</code> in{" "}
-            <code>toolCalls</code> only. What the model receives for each status
-            is in <Link href="/send-behavior">How send() behaves</Link>.
+            <code>onToolCall</code> fires for each of them too, with no
+            exceptions: a name that passes <code>canExecute</code> but has no
+            matching tool definition reports like every other denial. What the
+            model receives for each status is in{" "}
+            <Link href="/send-behavior">How send() behaves</Link>.
           </p>
         </Prose>
       </Section>

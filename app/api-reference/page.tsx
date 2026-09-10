@@ -81,56 +81,90 @@ const importValues = `import {
   useAgent,
   openAIAdapter,
   claudeAdapter,
+  AdapterError,
   validateToolNames,
   filterState,
   filterTools,
   validateToolCall,
+  validateToolArgs,
 } from 'react-observer-agent';`;
 
 const importTypes = `import type {
   ToolDefinition,
   AnyToolDefinition,
   ToolOptions,
+  ToolHandler,
+  ToolContext,
+  ToolArgsValidation,
   AIAgentProviderProps,
   PermissionsConfig,
   AgentOptions,
+  AgentEvent,
   AgentContext,
   AgentResponse,
+  TokenUsage,
   ToolCallResult,
+  ToolCallStatus,
   ConversationEntry,
   ModelAdapter,
   ModelRequest,
   ModelResponse,
+  StopReason,
   StateSource,
   PendingToolCall,
   ToolCallEvent,
   SendOptions,
   AgentError,
+  AgentErrorCode,
   JSONSchema,
   LLMToolCall,
   LLMToolDefinition,
   ConversationMessage,
   OpenAIAdapterConfig,
   ClaudeAdapterConfig,
+  StandardSchemaV1,
+  StandardSchemaProps,
+  StandardSchemaResult,
+  StandardSchemaIssue,
+  InferSchemaOutput,
 } from 'react-observer-agent';`;
 
-const registerToolSignature = `function registerTool<TArgs = unknown>(
+const registerToolSignature = `// Two overloads, in declaration order. With a schema the handler's argument
+// type comes from the schema output; without one it is the handler's own.
+function registerTool<S extends StandardSchemaV1>(
   name: string,
-  handler: (args: TArgs) => unknown | Promise<unknown>,
+  handler: ToolHandler<InferSchemaOutput<S>>,
+  options: ToolOptions & { schema: S },
+): ToolDefinition<InferSchemaOutput<S>>;
+
+function registerTool<TArgs = unknown>(
+  name: string,
+  handler: ToolHandler<TArgs>,
   options?: ToolOptions,
 ): ToolDefinition<TArgs>;
+
+type ToolHandler<TArgs = unknown> = (
+  args: TArgs,
+  context?: ToolContext,
+) => unknown | Promise<unknown>;
+
+interface ToolContext {
+  signal?: AbortSignal;
+}
 
 interface ToolOptions {
   description?: string;
   parameters?: JSONSchema;
+  schema?: StandardSchemaV1;
   confirm?: boolean;
 }
 
 interface ToolDefinition<TArgs = unknown> {
   name: string;
-  handler: (args: TArgs) => unknown | Promise<unknown>;
+  handler: ToolHandler<TArgs>;
   description?: string;
   parameters?: JSONSchema;
+  schema?: StandardSchemaV1;
   confirm: boolean;
 }
 
@@ -158,6 +192,34 @@ const registerToolExample = `const addToCart = registerTool(
   },
 );`;
 
+const registerToolSchemaExample = `import { z } from 'zod';
+
+const AddToCart = z.object({
+  productId: z.string(),
+  qty: z.number().default(1),
+});
+
+const addToCart = registerTool(
+  'addToCart',
+  // args is { productId: string; qty: number }, inferred from the schema.
+  async (args, context) => {
+    await syncCart(args.productId, args.qty, { signal: context?.signal });
+    return \`Added \${args.qty} x \${args.productId} to the cart\`;
+  },
+  {
+    description: 'Add a product to the shopping cart by id',
+    parameters: {
+      type: 'object',
+      properties: {
+        productId: { type: 'string' },
+        qty: { type: 'number' },
+      },
+      required: ['productId'],
+    },
+    schema: AddToCart,
+  },
+);`;
+
 const providerSignature = `interface AIAgentProviderProps {
   model: ModelAdapter;
   state: StateSource;
@@ -177,23 +239,45 @@ interface AgentOptions {
   debug?: boolean;
   maxTurns?: number;
   systemPrompt?: string;
+  maxStateBytes?: number;
   onError?: (error: AgentError) => void;
   onToolCall?: (call: ToolCallEvent) => void;
   onConfirm?: (call: PendingToolCall) => Promise<boolean>;
+  onEvent?: (event: AgentEvent) => void;
 }
 
 interface PendingToolCall {
   toolName: string;
   args: unknown;
   description?: string;
+  signal?: AbortSignal;
 }
 
 interface ToolCallEvent {
   toolName: string;
   args: unknown;
   result: unknown;
-  status: 'success' | 'error' | 'denied' | 'confirmed' | 'cancelled';
-}`;
+  status: ToolCallStatus;
+}
+
+type ToolCallStatus =
+  | 'success'
+  | 'error'
+  | 'denied'
+  | 'confirmed'
+  | 'cancelled';
+
+type AgentEvent =
+  | { type: 'turn_start'; turn: number; maxTurns: number }
+  | { type: 'state_read'; requested: string[]; keys: string[] }
+  | { type: 'tool_start'; toolName: string; args: unknown }
+  | {
+      type: 'tool_end';
+      toolName: string;
+      args: unknown;
+      result: unknown;
+      status: ToolCallStatus;
+    };`;
 
 const useAgentSignature = `function useAgent(): AgentContext;
 
@@ -213,28 +297,47 @@ interface AgentResponse {
   message: string;
   toolCalls: ToolCallResult[];
   error?: AgentError;
-  usage?: { promptTokens: number; completionTokens: number };
+  usage?: TokenUsage;
+}
+
+interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  // The cached part of promptTokens, when the provider reports it.
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
 }
 
 interface ToolCallResult {
   toolName: string;
   args: unknown;
   result: unknown;
-  status: 'success' | 'error' | 'denied' | 'confirmed' | 'cancelled';
+  status: ToolCallStatus;
 }
 
 interface ConversationEntry {
   role: 'user' | 'assistant' | 'tool';
   content: string;
   toolCalls?: ToolCallResult[];
+  // Assistant entries only: the error the interaction ended with.
+  error?: AgentError;
   timestamp: number;
 }
 
 interface AgentError {
   message: string;
-  code?: string;
+  code?: AgentErrorCode;
+  // The HTTP status, when the failure came from an adapter that had one.
+  status?: number;
   cause?: unknown;
-}`;
+}
+
+type AgentErrorCode =
+  | 'ABORTED'
+  | 'MAX_TURNS'
+  | 'ADAPTER_ERROR'
+  | 'TRUNCATED'
+  | 'REFUSED';`;
 
 const adapterSignature = `interface ModelAdapter {
   sendMessage(request: ModelRequest): Promise<ModelResponse>;
@@ -252,14 +355,22 @@ interface ModelRequest {
 interface ModelResponse {
   content: string | null;
   toolCalls?: LLMToolCall[];
-  usage?: { promptTokens: number; completionTokens: number };
+  usage?: TokenUsage;
+  stopReason?: StopReason;
+  providerData?: unknown;
 }
+
+type StopReason = 'end' | 'tool_use' | 'max_tokens' | 'refusal' | 'other';
 
 interface ConversationMessage {
   role: 'user' | 'assistant' | 'tool';
   content: string;
   toolCallId?: string;
   toolCalls?: LLMToolCall[];
+  // Tool messages only: the result reports a failure.
+  isError?: boolean;
+  // Adapter-owned. The loop copies it from ModelResponse and replays it.
+  providerData?: unknown;
 }
 
 interface LLMToolCall {
@@ -272,6 +383,16 @@ interface LLMToolDefinition {
   name: string;
   description: string;
   parameters: JSONSchema;
+}
+
+class AdapterError extends Error {
+  readonly name: 'AdapterError';
+  readonly status?: number;
+  readonly body?: string;
+  constructor(
+    message: string,
+    options?: { status?: number; body?: string; cause?: unknown },
+  );
 }`;
 
 const adapterConfigs = `function openAIAdapter(config: OpenAIAdapterConfig): ModelAdapter;
@@ -280,7 +401,8 @@ interface OpenAIAdapterConfig {
   apiKey?: string;
   model?: string;
   baseURL?: string;
-  temperature?: number;
+  // Defaults to 0.2. Null omits the field from the request.
+  temperature?: number | null;
   headers?: Record<string, string>;
 }
 
@@ -291,6 +413,8 @@ interface ClaudeAdapterConfig {
   model?: string;
   baseURL?: string;
   maxTokens?: number;
+  // Prompt caching for tools and the system prompt. Defaults to true.
+  cache?: boolean;
   headers?: Record<string, string>;
 }`;
 
@@ -323,7 +447,7 @@ export default function ApiReferencePage() {
     <div className="mx-auto w-full max-w-3xl">
       <PageHeader
         title="API reference"
-        lead="Nine value exports and the types behind them. Every default listed here is the one the library applies at runtime."
+        lead="Eleven value exports and the types behind them. Every default listed here is the one the library applies at runtime."
       />
 
       <Section title="Exports">
@@ -357,6 +481,11 @@ export default function ApiReferencePage() {
               "The Anthropic Messages API with tool use.",
             ],
             [
+              term("AdapterError"),
+              "class",
+              "The error both built-in adapters throw. Carries the HTTP status and the raw response body when the failure came from a response.",
+            ],
+            [
               term("validateToolNames"),
               "function",
               "Throws on a reserved __ prefix or a duplicate name. The provider calls it on mount.",
@@ -376,11 +505,16 @@ export default function ApiReferencePage() {
               "function",
               "Returns whether a tool name is in canExecute.",
             ],
+            [
+              term("validateToolArgs"),
+              "function",
+              "Runs the same schema-or-parameters check the loop runs and returns a ToolArgsValidation, either the validated value or the errors. Async, since a Standard Schema validator may be.",
+            ],
           ]}
         />
         <Prose>
           <p>
-            The last four are building blocks, exported for tests and custom
+            The last five are building blocks, exported for tests and custom
             wiring. The provider already calls them on the paths that matter, so
             a typical app never calls them directly.
           </p>
@@ -415,6 +549,19 @@ export default function ApiReferencePage() {
               </>,
             ],
             [
+              "schema",
+              "StandardSchemaV1",
+              "undefined",
+              <>
+                A Standard Schema validator (Zod 3.24+, Valibot 1+, ArkType 2+).
+                It replaces the built-in subset check, the handler receives the
+                validated value, and the handler&apos;s argument type is
+                inferred from the schema output. <code>parameters</code> still
+                supplies the JSON Schema the model sees, since the library
+                derives nothing from the validator.
+              </>,
+            ],
+            [
               "confirm",
               "boolean",
               "false",
@@ -434,6 +581,14 @@ export default function ApiReferencePage() {
               rather than <code>undefined</code>.
             </li>
             <li>
+              Handlers are called as <code>handler(args, {"{ signal }"})</code>.
+              A handler written against an older version takes one argument, so
+              the context is optional and reads as <code>context?.signal</code>.
+              Forward it to <code>fetch</code> or any other long work: an abort
+              ends the loop&apos;s wait either way, but only the handler can
+              stop the work itself.
+            </li>
+            <li>
               Names beginning with <code>__</code> are reserved for internal
               tools. <code>__readState</code> is the only one today.
             </li>
@@ -448,7 +603,52 @@ export default function ApiReferencePage() {
               <code>type</code>, <code>properties</code>, <code>required</code>,{" "}
               <code>items</code> and <code>enum</code>. Keywords outside that
               set pass through untouched, so treat <code>args</code> as
-              untrusted inside the handler.
+              untrusted inside the handler. A tool carrying a{" "}
+              <code>schema</code> skips that subset entirely and validates
+              through the validator instead.
+            </li>
+            <li>
+              <code>validateToolArgs(tool, args)</code> runs the same check the
+              loop runs and resolves to <code>{`{ valid: true, value }`}</code>{" "}
+              or <code>{`{ valid: false, errors }`}</code>. The{" "}
+              <code>value</code> is what the handler should receive, since a
+              schema can apply defaults and transforms.
+            </li>
+          </ul>
+        </Prose>
+        <CodeBlock code={registerToolSchemaExample} lang="ts" />
+        <Prose>
+          <ul>
+            <li>
+              The argument type comes from the schema output, so annotating the
+              handler is optional. An annotation that disagrees with the schema
+              is a compile error rather than a silent fallback.{" "}
+              <code>InferSchemaOutput&lt;S&gt;</code> is that output type,
+              exported for anyone typing a handler by hand.
+            </li>
+            <li>
+              <code>StandardSchemaV1</code> is the package&apos;s own copy of
+              the{" "}
+              <a
+                href="https://standardschema.dev"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Standard Schema
+              </a>{" "}
+              interface, with <code>StandardSchemaProps</code>,{" "}
+              <code>StandardSchemaResult</code> and{" "}
+              <code>StandardSchemaIssue</code> exported alongside it. Copying
+              the spec is what keeps the package dependency free while accepting
+              validators from three libraries.
+            </li>
+            <li>
+              An explicit type argument next to an inline schema (
+              <code>registerTool&lt;T&gt;(name, handler, {"{ schema }"})</code>)
+              is a compile error at the <code>schema</code> property, whether or
+              not the two agree. The type argument turns inference off, which
+              would leave two unchecked sources of truth for the argument type.
+              Drop it and let the schema supply the type.
             </li>
           </ul>
         </Prose>
@@ -560,6 +760,17 @@ export default function ApiReferencePage() {
               "Joined ahead of the generated manifest prompt, separated by a blank line.",
             ],
             [
+              "maxStateBytes",
+              "number",
+              "undefined",
+              <>
+                Per-key byte ceiling on a <code>__readState</code> result, unset
+                meaning no limit. A value over it is replaced with{" "}
+                <code>{`{ __truncated: true, limit, bytes, preview }`}</code>,
+                so one oversized key cannot spend the whole context window.
+              </>,
+            ],
+            [
               "onError",
               "(error: AgentError) => void",
               "undefined",
@@ -584,12 +795,88 @@ export default function ApiReferencePage() {
               "undefined",
               <>
                 Approval handler for <code>confirm: true</code> tools. Without
-                one, those tools are skipped as <code>cancelled</code>.
+                one, those tools are skipped as <code>cancelled</code>. The
+                pending call carries the interaction&apos;s{" "}
+                <code>signal</code>, so a confirmation UI can close itself when
+                the interaction is cancelled underneath it.
+              </>,
+            ],
+            [
+              "onEvent",
+              "(event: AgentEvent) => void",
+              "undefined",
+              <>
+                Observation only. Fires <code>turn_start</code>,{" "}
+                <code>state_read</code>, <code>tool_start</code> and{" "}
+                <code>tool_end</code> as the loop runs.
               </>,
             ],
           ])}
         />
+
         <Prose>
+          <p>
+            <strong>AgentEvent</strong>
+          </p>
+        </Prose>
+        <Table
+          head={["Event", "Fields", "When it fires"]}
+          rows={[
+            [
+              term("turn_start"),
+              mono("turn, maxTurns"),
+              prose(
+                <>
+                  Right before each model call. <code>turn</code> counts from 1.
+                </>,
+              ),
+            ],
+            [
+              term("state_read"),
+              mono("requested, keys"),
+              prose(
+                <>
+                  After a <code>__readState</code> call resolves.{" "}
+                  <code>requested</code> is what the model asked for,{" "}
+                  <code>keys</code> what survived <code>canAccess</code>. A call
+                  whose arguments fail the schema is answered with an error and
+                  fires nothing.
+                </>,
+              ),
+            ],
+            [
+              term("tool_start"),
+              mono("toolName, args"),
+              prose(
+                <>
+                  Before the <code>canExecute</code> check, with the raw
+                  arguments from the model, so a denied call is as visible as an
+                  executed one.
+                </>,
+              ),
+            ],
+            [
+              term("tool_end"),
+              mono("toolName, args, result, status"),
+              prose(
+                <>
+                  Once per <code>tool_start</code>, with the final status.{" "}
+                  <code>args</code> is the validated value once the schema has
+                  run, and the raw model arguments on a call that was denied or
+                  failed validation.
+                </>,
+              ),
+            ],
+          ]}
+        />
+        <Prose>
+          <p>
+            <code>onToolCall</code> reports a tool after the fact and never
+            reports <code>__readState</code>. <code>onEvent</code> brackets each
+            tool with a start and an end, and <code>state_read</code> is the one
+            place a state read is visible at all, which makes it the hook to
+            wire progress UI and telemetry to.
+          </p>
           <p>
             The provider reads <code>model</code>, <code>state</code>,{" "}
             <code>tools</code>, <code>permissions</code> and{" "}
@@ -609,24 +896,45 @@ export default function ApiReferencePage() {
               "send",
               "(message, options?) => Promise<AgentResponse>",
               <>
-                Runs one interaction. It resolves rather than rejects: failures
-                arrive as <code>response.error</code>.
+                Runs one interaction, queued behind any already in flight. It
+                resolves rather than rejects: failures arrive as{" "}
+                <code>response.error</code>. The one exception is an{" "}
+                <code>onError</code> callback that throws, which rejects{" "}
+                <code>send()</code> after the records are written.
               </>,
             ],
             [
               "isProcessing",
               "boolean",
-              "True while an interaction is in flight.",
+              <>
+                True from the first <code>send()</code> until the last one
+                queued behind it settles.
+              </>,
             ],
             [
               "history",
               "ConversationEntry[]",
-              "One user entry per send, one assistant entry per completed response. Scoped to the provider instance.",
+              <>
+                One user entry per <code>send()</code> and one assistant entry
+                per <code>send()</code>, success or failure alike, so history
+                always alternates user, assistant. A failed or aborted
+                interaction puts its error on{" "}
+                <code>ConversationEntry.error</code>, and its content follows{" "}
+                <code>AgentResponse.message</code>: the partial or refusal text
+                on <code>TRUNCATED</code> or <code>REFUSED</code>, empty
+                otherwise. Scoped to the provider instance.
+              </>,
             ],
             [
               "clearHistory",
               "() => void",
-              "Clears the history, the last response, and the replayed model transcript.",
+              <>
+                Clears the history, the last response, and the replayed model
+                transcript. Called while an interaction is running, it discards
+                that interaction too: its <code>send()</code> still resolves and{" "}
+                <code>onError</code> still fires, but nothing it produced lands
+                anywhere.
+              </>,
             ],
             [
               "lastResponse",
@@ -647,7 +955,7 @@ export default function ApiReferencePage() {
             [
               "message",
               "string",
-              "The final text. Empty when the interaction ended on MAX_TURNS or ABORTED.",
+              "The final text. Empty when the interaction ended on MAX_TURNS or ABORTED, and the partial or refusal text when it ended on TRUNCATED or REFUSED.",
             ],
             [
               "toolCalls",
@@ -661,8 +969,15 @@ export default function ApiReferencePage() {
             ],
             [
               "usage",
-              "{ promptTokens, completionTokens }",
-              "Totalled across the turns of the interaction. Undefined when no adapter response reported usage, rather than a zero.",
+              "TokenUsage | undefined",
+              <>
+                Totalled across the turns of the interaction. Undefined when no
+                adapter response reported usage, rather than a zero.{" "}
+                <code>promptTokens</code> is the whole input, cached tokens
+                included; <code>cacheReadTokens</code> and{" "}
+                <code>cacheWriteTokens</code> break that cached part out when
+                the provider reports it.
+              </>,
             ],
           ])}
         />
@@ -693,12 +1008,86 @@ export default function ApiReferencePage() {
             </li>
           </ul>
         </Prose>
-        <Callout tone="note" title="AgentError codes">
-          <code>MAX_TURNS</code> when the turn budget runs out while the model
-          is still calling tools, and <code>ABORTED</code> when the{" "}
-          <code>signal</code> passed to <code>send()</code> fires. An adapter
-          that throws produces an error with a message and a <code>cause</code>{" "}
-          and no code.
+        <Prose>
+          <p>
+            <strong>AgentErrorCode</strong>
+          </p>
+        </Prose>
+        <Table
+          head={["Code", "When it is set", "What comes with it"]}
+          rows={[
+            [
+              term("ABORTED"),
+              prose(
+                <>
+                  The <code>signal</code> passed to <code>send()</code> fired,
+                  or the provider unmounted.
+                </>,
+              ),
+              prose(
+                <>
+                  An empty <code>message</code>. The one code that does not
+                  reach <code>onError</code>, since a cancel is a caller
+                  decision.
+                </>,
+              ),
+            ],
+            [
+              term("MAX_TURNS"),
+              prose(
+                "The turn budget ran out while the model was still calling tools, so it never got to answer.",
+              ),
+              prose(
+                <>
+                  An empty <code>message</code>. The tool calls made along the
+                  way are still in <code>toolCalls</code>.
+                </>,
+              ),
+            ],
+            [
+              term("ADAPTER_ERROR"),
+              prose(
+                <>
+                  The adapter threw an <code>AdapterError</code>. Both built-in
+                  adapters throw one on every failure path.
+                </>,
+              ),
+              prose(
+                <>
+                  <code>error.status</code> when the failure came from a non-2xx
+                  response, absent on a network failure or an unparseable body.{" "}
+                  <code>error.cause</code> is the <code>AdapterError</code>,
+                  which also carries the raw <code>body</code>.
+                </>,
+              ),
+            ],
+            [
+              term("TRUNCATED"),
+              prose("The model hit its output token limit."),
+              prose(
+                <>
+                  The partial text, in <code>message</code>.
+                </>,
+              ),
+            ],
+            [
+              term("REFUSED"),
+              prose("The model declined to answer."),
+              prose(
+                <>
+                  Whatever text came back, in <code>message</code>.
+                </>,
+              ),
+            ],
+          ]}
+        />
+        <Callout tone="note" title="An exception with no code">
+          Only an <code>AdapterError</code> becomes{" "}
+          <code>ADAPTER_ERROR</code>. Anything else thrown at the provider, a
+          custom adapter raising a plain <code>Error</code> or a throwing{" "}
+          <code>onToolCall</code>, still produces an error with a message and a{" "}
+          <code>cause</code> and no code. It reaches <code>onError</code> like
+          any other failure.
         </Callout>
       </Section>
 
@@ -736,7 +1125,9 @@ export default function ApiReferencePage() {
               </Badge>,
               <>
                 A <code>confirm: true</code> tool the user denied, or one with
-                no <code>onConfirm</code> handler to ask.
+                no <code>onConfirm</code> handler to ask. An approval that
+                arrives after the interaction was cancelled lands here too,
+                without running the handler.
               </>,
               mono("{ status: 'cancelled', reason }"),
             ],
@@ -755,9 +1146,9 @@ export default function ApiReferencePage() {
                 error
               </Badge>,
               <>
-                The handler threw, or the arguments failed the{" "}
-                <code>parameters</code> schema. A validation failure means the
-                handler never ran.
+                The handler threw, or the arguments failed the tool&apos;s{" "}
+                <code>schema</code> or <code>parameters</code> check. A
+                validation failure means the handler never ran.
               </>,
               mono("{ error }"),
             ],
@@ -765,10 +1156,12 @@ export default function ApiReferencePage() {
         />
         <Prose>
           <p>
-            <code>onToolCall</code> fires for each of these, with one edge case:
-            a name that passes <code>canExecute</code> but has no matching tool
-            definition is recorded as <code>denied</code> in{" "}
-            <code>toolCalls</code> without firing the callback.
+            <code>onToolCall</code> fires for each of these, including a name
+            that passes <code>canExecute</code> but has no matching tool
+            definition. Before 0.3.0 that case landed in <code>toolCalls</code>{" "}
+            as <code>denied</code> without firing the callback.{" "}
+            <code>onEvent</code> reports the same outcomes as{" "}
+            <code>tool_end</code>, one per <code>tool_start</code>.
           </p>
           <p>
             <Link href="/permissions">Permissions and safety</Link> walks
@@ -845,10 +1238,47 @@ export default function ApiReferencePage() {
               Throw on network failures, non-2xx responses and malformed
               payloads. The provider turns a throw into{" "}
               <code>AgentResponse.error</code> and calls <code>onError</code>.
+              Throwing an <code>AdapterError</code> is what gets the failure
+              reported as <code>ADAPTER_ERROR</code> with a{" "}
+              <code>status</code>; a plain <code>Error</code> arrives with no
+              code.
             </li>
             <li>
               Rethrow an <code>AbortError</code> unchanged instead of rewrapping
               it. The loop identifies cancellation by that error name.
+            </li>
+            <li>
+              Skip an assistant message with empty content and no{" "}
+              <code>toolCalls</code>. Both providers reject an empty assistant
+              turn, and the loop already keeps the final one out of the
+              transcript.
+            </li>
+          </ul>
+          <p>And should:</p>
+          <ul>
+            <li>
+              Report <code>stopReason</code>. With no tool calls in the
+              response, <code>max_tokens</code> becomes <code>TRUNCATED</code>{" "}
+              and <code>refusal</code> becomes <code>REFUSED</code>. A missing
+              one reads as a normal end, and tool calls are processed whatever
+              the stop reason.
+            </li>
+            <li>
+              Report <code>usage</code> with <code>promptTokens</code> as the
+              total input for the call, cached tokens included, and break the
+              cached part out into <code>cacheReadTokens</code> and{" "}
+              <code>cacheWriteTokens</code> when the provider reports it.
+            </li>
+            <li>
+              Set <code>providerData</code> when the provider needs something
+              back unchanged, and prefer it over rebuilding the message when it
+              comes back on an assistant message. This is what keeps Anthropic
+              thinking blocks and their signatures intact.
+            </li>
+            <li>
+              Map <code>isError</code> on a tool message onto the provider&apos;s
+              own failure flag when it has one (Anthropic{" "}
+              <code>is_error</code>). OpenAI has none, so the adapter drops it.
             </li>
           </ul>
         </Prose>
@@ -883,9 +1313,13 @@ export default function ApiReferencePage() {
             ],
             [
               "temperature",
-              "number",
+              "number | null",
               "0.2",
-              "Sent on every request.",
+              <>
+                Sent on every request, unless it is <code>null</code>, which
+                leaves the field out for reasoning models that reject any value
+                but their own default.
+              </>,
             ],
             [
               "headers",
@@ -938,6 +1372,18 @@ export default function ApiReferencePage() {
               <>
                 Sent as <code>max_tokens</code>, which the Anthropic API
                 requires.
+              </>,
+            ],
+            [
+              "cache",
+              "boolean",
+              "true",
+              <>
+                Prompt caching. The system prompt goes out as a text block with
+                a <code>cache_control</code> breakpoint, which caches the tools
+                and the system prompt together across calls.{" "}
+                <code>cache: false</code> sends the plain string instead, the
+                shape 0.2.0 used.
               </>,
             ],
             [
@@ -1005,9 +1451,21 @@ export default function ApiReferencePage() {
             circular references, are stripped, with a warning in debug mode.
           </p>
           <p>
+            <code>options.maxStateBytes</code> caps the serialized size of each
+            key that comes back. A value over the cap is replaced with a marker
+            carrying the limit, the real size and a JSON preview. Arguments are
+            validated against the schema above first, so a call that sends{" "}
+            <code>keys</code> as a string is answered with an error the model
+            can retry from rather than failing the interaction.
+          </p>
+          <p>
             The round trip never appears in <code>history</code>,{" "}
-            <code>AgentResponse.toolCalls</code> or <code>onToolCall</code>. It
-            exists only inside the model-facing message list.{" "}
+            <code>AgentResponse.toolCalls</code> or <code>onToolCall</code>. The
+            one consumer-facing trace is the <code>state_read</code> event on{" "}
+            <code>options.onEvent</code>, which reports every validated call
+            with the keys the model asked for and the keys left after{" "}
+            <code>canAccess</code> filtering. Everything else about it stays
+            inside the model-facing message list.{" "}
             <Link href="/pull-based-state">Pull-based state</Link> covers the
             reasoning.
           </p>

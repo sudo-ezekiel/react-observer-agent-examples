@@ -48,6 +48,52 @@ export const tools = [
   }),
 ];`;
 
+const schemaAndContextCode = `import { z } from 'zod';
+import { registerTool } from 'react-observer-agent';
+import { useStore } from './store';
+
+const AddToCart = z.object({
+  productId: z.string(),
+  qty: z.number().int().positive().default(1),
+});
+
+registerTool(
+  'addToCart',
+  (args) => {
+    useStore.getState().addToCart(args.productId, args.qty);
+    return \`Added \${args.qty} x \${args.productId} to the cart\`;
+  },
+  {
+    description: 'Add a product to the cart',
+    parameters: {
+      type: 'object',
+      properties: { productId: { type: 'string' }, qty: { type: 'integer' } },
+      required: ['productId'],
+    },
+    schema: AddToCart, // args is { productId: string; qty: number }
+  },
+);
+
+registerTool(
+  'searchProducts',
+  async (args: { query: string }, context) => {
+    // Forwarding the signal is what stops the request. The loop only stops
+    // waiting on the handler; it cannot cancel work already running.
+    const res = await fetch(\`/api/search?q=\${encodeURIComponent(args.query)}\`, {
+      signal: context?.signal,
+    });
+    return res.json();
+  },
+  {
+    description: 'Search the product catalog',
+    parameters: {
+      type: 'object',
+      properties: { query: { type: 'string' } },
+      required: ['query'],
+    },
+  },
+);`;
+
 const adapterCode = `// model.ts
 import { openAIAdapter, claudeAdapter } from 'react-observer-agent';
 
@@ -155,8 +201,23 @@ export default function GettingStarted() {
           <p>
             React 18 or newer is a peer dependency. The package itself has no
             runtime dependencies, and ships both ESM and CJS builds with types.
+            As of v0.3.0 both bundles carry a <code>{"'use client'"}</code>{" "}
+            banner, so importing <code>react-observer-agent</code> inside a
+            Next.js App Router tree needs no hand-written re-export module
+            around it.
           </p>
         </Prose>
+        <Callout tone="note" title="Your own files still need the directive">
+          The banner covers the package, not your code. A file calling{" "}
+          <code>useAgent</code> has to be marked{" "}
+          <code>{'"use client"'}</code> because a hook cannot run in a Server
+          Component, and in practice the file that renders{" "}
+          <code>AIAgentProvider</code> does too: its <code>model</code> adapter,{" "}
+          <code>state</code> getter, <code>tools</code> handlers and{" "}
+          <code>options</code> callbacks are all functions, and functions do not
+          cross the server-to-client boundary. Every file on this site that
+          touches the library carries the directive for that reason.
+        </Callout>
       </Section>
 
       <Section title="1. Register tools">
@@ -185,9 +246,25 @@ export default function GettingStarted() {
               </code>. Use that for tools that take no arguments.
             </li>
             <li>
+              <strong><code>schema</code> takes a Standard Schema
+              validator</strong> (Zod 3.24+, Valibot 1+, ArkType 2+). It
+              replaces the built-in JSON Schema subset check, the handler
+              receives the validated value so defaults and transforms apply,
+              and the handler&apos;s argument type is inferred from the schema
+              output. <code>parameters</code> still supplies the JSON Schema the
+              model sees; the library does not derive one from the schema.
+            </li>
+            <li>
               <strong><code>confirm: true</code></strong> routes the call
               through your <code>onConfirm</code> handler before the handler
               runs. See <Link href="/permissions">Permissions and safety</Link>.
+            </li>
+            <li>
+              <strong>The handler takes a second argument</strong>, a{" "}
+              <code>ToolContext</code> carrying the interaction&apos;s{" "}
+              <code>signal</code>. Read it as <code>context?.signal</code>: the
+              parameter is typed optional so one-argument handlers written
+              against 0.2.0 keep compiling.
             </li>
             <li>
               Names must be unique across the tools passed to one provider, and
@@ -196,6 +273,19 @@ export default function GettingStarted() {
             </li>
           </ul>
         </Prose>
+        <Prose>
+          <p>
+            The two together: a schema-validated tool, whose <code>args</code>{" "}
+            the handler gets typed for free, and a slow tool that forwards the
+            signal so a cancelled interaction stops the request rather than
+            leaving it running with its result discarded.
+          </p>
+        </Prose>
+        <CodeBlock
+          code={schemaAndContextCode}
+          lang="ts"
+          filename="tools.ts"
+        />
       </Section>
 
       <Section title="2. Configure an adapter">
