@@ -1,10 +1,10 @@
 # Basic example
 
-A small shopping app wired to `react-observer-agent`, used as the live smoke test for both adapters. Zustand holds the state, three tools are registered (`navigateTo`, `addToCart`, `clearCart`), and `clearCart` requires confirmation.
+A small shopping app wired to `react-observer-agent`, used as the live smoke test for both adapters. Zustand holds the state and four tools are registered (`navigateTo`, `addToCart`, `checkStock`, `clearCart`). `clearCart` requires confirmation, and `checkStock` forwards the interaction's abort signal into its own async work.
 
 ## Setup
 
-This app installs `react-observer-agent` from npm, so nothing else needs to be checked out:
+This app installs `react-observer-agent` from npm, so nothing else needs to be checked out. It needs 0.3.0 or newer, since it uses the tool handler context and the error carried on a history entry.
 
 ```bash
 cd local-example && npm install && cp .env.example .env
@@ -29,7 +29,7 @@ The browser calls a same-origin `/api/openai` or `/api/anthropic` path, and `vit
 
 ## Smoke test
 
-Run these three prompts against each provider. Together they exercise the whole loop. Keep the browser console open, since `debug: true` logs every step.
+Run these four prompts against each provider. Together they exercise the whole loop. Keep the browser console open, since `debug: true` logs every step.
 
 **1. "What's in my cart?"**
 
@@ -47,8 +47,20 @@ The catalogue in [src/store.ts](src/store.ts) holds Wireless Headphones, a Mecha
 
 Exercises confirmation. A browser confirm dialog should appear before anything changes. Decline it once and check that the agent reports the cancellation rather than clearing the cart anyway, then try again and accept.
 
+**4. "Is the mechanical keyboard in stock?"**
+
+Exercises the tool handler context. `checkStock` in [src/tools.ts](src/tools.ts) takes a second `ToolContext` argument and passes `context?.signal` into a stand-in inventory lookup, which waits about two and a half seconds. The keyboard should come back out of stock.
+
+Send it a second time and press Stop while it waits. The lookup rejects the moment the signal fires rather than running to completion, the call is recorded as `cancelled`, and the turn lands in the transcript as `Cancelled`. A handler that ignored the signal would keep running in the background and the loop would throw its result away, which is the difference the second argument buys.
+
+## Errors and cancellation
+
+A failed interaction is a real assistant entry: empty content, with the error on `ConversationEntry.error`. `ChatPanel` reads that field and renders the message in place of the bubble, so a bad key, a rate limit or a dropped connection shows the failure rather than an empty pill.
+
+`options.onError` in [src/App.tsx](src/App.tsx) puts the same failure in a banner above the chat, which is where a real app would log or report it. Aborts never reach `onError`, so a cancel shows up in the transcript only.
+
 ## What to watch for
 
-- Requests to `/api/...` returning 401 mean the key is missing or wrong in `.env`. Restart the dev server after editing it, since the proxy reads the key at startup.
+- Requests to `/api/...` returning 401 mean the key is missing or wrong in `.env`. Restart the dev server after editing it, since the proxy reads the key at startup. The status should reach both the banner and the transcript as `ADAPTER_ERROR (HTTP 401)`; a blank pill instead means the error is not being read off the entry.
 - A 400 mentioning `tool_calls` or `tool_use` points at adapter message conversion.
 - The agent answering about the cart without a `__readState` call in the console means the state manifest is not reaching the system prompt.

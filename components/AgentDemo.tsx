@@ -2,7 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AIAgentProvider, useAgent } from "react-observer-agent";
-import type { PendingToolCall, ToolCallEvent } from "react-observer-agent";
+import type {
+  AgentEvent,
+  PendingToolCall,
+  ToolCallEvent,
+} from "react-observer-agent";
 import {
   STATE_DESCRIPTIONS,
   createTools,
@@ -32,6 +36,10 @@ export type AgentDemoProps = {
   cancellable?: boolean;
   /** Show the token usage readout. Default false. */
   showUsage?: boolean;
+  /** Wire AgentOptions.onEvent and show what it reports. Default false. */
+  showEvents?: boolean;
+  /** Makes addToCart slow enough to cancel mid-flight. Default 0. */
+  addToCartDelayMs?: number;
   /** Passed through to AgentOptions.maxTurns. */
   maxTurns?: number;
 };
@@ -49,10 +57,15 @@ export function AgentDemo({
   confirmMode = "inline",
   cancellable = false,
   showUsage = false,
+  showEvents = false,
+  addToCartDelayMs = 0,
   maxTurns,
 }: AgentDemoProps) {
   const store = useShopStore();
-  const tools = useMemo(() => createTools(store), [store]);
+  const tools = useMemo(
+    () => createTools(store, { addToCartDelayMs }),
+    [addToCartDelayMs, store]
+  );
   const adapter = useMemo(
     () =>
       scriptedAdapter(plan, store.getState, {
@@ -63,10 +76,15 @@ export function AgentDemo({
   );
 
   const [toolCalls, setToolCalls] = useState<ToolCallEvent[]>([]);
+  const [events, setEvents] = useState<AgentEvent[]>([]);
   const [pending, setPending] = useState<PendingConfirm | null>(null);
 
   const onToolCall = useCallback((call: ToolCallEvent) => {
     setToolCalls((previous) => [...previous, call]);
+  }, []);
+
+  const recordEvent = useCallback((event: AgentEvent) => {
+    setEvents((previous) => [...previous, event]);
   }, []);
 
   const onConfirm = useMemo(() => {
@@ -74,7 +92,24 @@ export function AgentDemo({
     if (confirmMode === "approve") return async () => true;
     if (confirmMode === "deny") return async () => false;
     return (call: PendingToolCall) =>
-      new Promise<boolean>((resolve) => setPending({ call, resolve }));
+      new Promise<boolean>((resolve) => {
+        // A cancel while the prompt is open has to take the prompt with it.
+        // The loop has already dropped the call by then, so an Allow clicked
+        // afterwards would answer a question nobody is still asking.
+        const onAbort = () => {
+          setPending((current) => (current?.call === call ? null : current));
+          resolve(false);
+        };
+        call.signal?.addEventListener("abort", onAbort, { once: true });
+
+        setPending({
+          call,
+          resolve: (allowed) => {
+            call.signal?.removeEventListener("abort", onAbort);
+            resolve(allowed);
+          },
+        });
+      });
   }, [confirmMode]);
 
   const resolveConfirm = useCallback(
@@ -91,6 +126,7 @@ export function AgentDemo({
     pending?.resolve(false);
     setPending(null);
     setToolCalls([]);
+    setEvents([]);
     store.reset();
   }, [pending, store]);
 
@@ -100,7 +136,14 @@ export function AgentDemo({
       state={() => store.getState()}
       tools={tools}
       permissions={{ canAccess, canExecute, stateDescriptions: STATE_DESCRIPTIONS }}
-      options={{ maxTurns, onConfirm, onToolCall }}
+      options={{
+        maxTurns,
+        onConfirm,
+        onToolCall,
+        // Left off where nothing renders it, so a demo that ignores the stream
+        // does not re-render on every turn and state read.
+        onEvent: showEvents ? recordEvent : undefined,
+      }}
     >
       <Panel
         store={store}
@@ -108,7 +151,9 @@ export function AgentDemo({
         suggestions={suggestions}
         cancellable={cancellable}
         showUsage={showUsage}
+        showEvents={showEvents}
         toolCalls={toolCalls}
+        events={events}
         pending={pending}
         onResolveConfirm={resolveConfirm}
         onReset={reset}
@@ -123,7 +168,9 @@ type PanelProps = {
   suggestions: string[];
   cancellable: boolean;
   showUsage: boolean;
+  showEvents: boolean;
   toolCalls: ToolCallEvent[];
+  events: AgentEvent[];
   pending: PendingConfirm | null;
   onResolveConfirm: (allowed: boolean) => void;
   onReset: () => void;
@@ -135,7 +182,9 @@ function Panel({
   suggestions,
   cancellable,
   showUsage,
+  showEvents,
   toolCalls,
+  events,
   pending,
   onResolveConfirm,
   onReset,
@@ -207,11 +256,28 @@ function Panel({
                     : "self-start bg-neutral-100 text-neutral-800 dark:bg-neutral-800 dark:text-neutral-200"
                 }`}
               >
-                {entry.content || (
+                {entry.content}
+                {!entry.content && !entry.error ? (
                   <span className="italic text-neutral-500 dark:text-neutral-400">
                     No text came back for this turn.
                   </span>
-                )}
+                ) : null}
+
+                {/* Per-turn attribution the banner below cannot give:
+                    lastResponse only ever holds the newest interaction, so a
+                    failed turn further up the transcript keeps its reason. */}
+                {entry.error ? (
+                  <div
+                    className={`text-xs text-red-600 dark:text-red-400 ${
+                      entry.content ? "mt-2" : ""
+                    }`}
+                  >
+                    <span className="font-mono font-semibold">
+                      {entry.error.code ?? "ERROR"}
+                    </span>{" "}
+                    {entry.error.message}
+                  </div>
+                ) : null}
               </div>
             ))}
 
@@ -370,6 +436,36 @@ function Panel({
           </ul>
         )}
 
+        {showEvents ? (
+          <div className="mt-5">
+            <PanelTitle>Events</PanelTitle>
+            {events.length === 0 ? (
+              <p className="mt-2 text-sm text-neutral-500 dark:text-neutral-400">
+                Nothing yet. <code className="font-mono">onEvent</code> reports
+                every turn, state read and tool call as the loop runs, including
+                the <code className="font-mono">__readState</code> traffic the
+                list above leaves out.
+              </p>
+            ) : (
+              <ul className="mt-3 flex max-h-52 flex-col gap-1 overflow-y-auto">
+                {events.map((event, index) => (
+                  <li
+                    key={index}
+                    className="flex flex-wrap items-baseline gap-2 rounded-md border border-neutral-200 px-2.5 py-1.5 dark:border-neutral-800"
+                  >
+                    <span className="font-mono text-[11px] text-neutral-800 dark:text-neutral-200">
+                      {event.type}
+                    </span>
+                    <span className="min-w-0 text-xs text-neutral-500 dark:text-neutral-400">
+                      {describeEvent(event)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ) : null}
+
         {showUsage ? (
           <div className="mt-4 grid grid-cols-2 gap-2 sm:max-w-sm">
             <Stat
@@ -406,4 +502,27 @@ function PanelTitle({ children }: { children: string }) {
 
 function format(value: unknown): string {
   return typeof value === "string" ? value : JSON.stringify(value ?? null);
+}
+
+/**
+ * One line per AgentEvent. A state_read reports the keys asked for and the keys
+ * allowed, never the values, which stay in the message list the model sees.
+ */
+function describeEvent(event: AgentEvent): string {
+  switch (event.type) {
+    case "turn_start":
+      return `turn ${event.turn} of ${event.maxTurns}`;
+    case "state_read": {
+      const blocked = event.requested.filter((key) => !event.keys.includes(key));
+      const returned = event.keys.length > 0 ? event.keys.join(", ") : "nothing";
+      const line = `asked for ${event.requested.join(", ")}, got ${returned}`;
+      return blocked.length > 0
+        ? `${line} (${blocked.join(", ")} not permitted)`
+        : line;
+    }
+    case "tool_start":
+      return `${event.toolName} ${format(event.args)}`;
+    case "tool_end":
+      return `${event.toolName} ${event.status}`;
+  }
 }

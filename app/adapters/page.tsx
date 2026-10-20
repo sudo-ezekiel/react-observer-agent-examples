@@ -27,7 +27,7 @@ interface OpenAIAdapterConfig {
   apiKey?: string;          // Dev and prototyping only
   model?: string;           // Default: 'gpt-4o'
   baseURL?: string;         // Proxy endpoint (recommended for production)
-  temperature?: number;     // Default: 0.2
+  temperature?: number | null; // Default: 0.2; null omits the field
   headers?: Record<string, string>; // Extra headers, e.g. auth for your proxy
 }`;
 
@@ -38,6 +38,7 @@ interface ClaudeAdapterConfig {
   model?: string;           // Default: 'claude-opus-5'
   baseURL?: string;         // Proxy endpoint (recommended for production)
   maxTokens?: number;       // Required by the API; default: 16000
+  cache?: boolean;          // Prompt caching for tools + system prompt; default: true
   headers?: Record<string, string>; // Extra headers, spread last so they win
 }`;
 
@@ -66,12 +67,25 @@ interface ConversationMessage {
   content: string;
   toolCallId?: string;             // links a tool message to the call it answers
   toolCalls?: LLMToolCall[];       // present on assistant messages that requested tools
+  isError?: boolean;               // tool messages only: the result reports a failure
+  providerData?: unknown;          // what you returned last turn, replayed verbatim
 }
+
+type StopReason = 'end' | 'tool_use' | 'max_tokens' | 'refusal' | 'other';
 
 interface ModelResponse {
   content: string | null;          // null when the model only called tools
   toolCalls?: LLMToolCall[];
-  usage?: { promptTokens: number; completionTokens: number };
+  usage?: TokenUsage;
+  stopReason?: StopReason;         // max_tokens and refusal become TRUNCATED and REFUSED
+  providerData?: unknown;          // opaque, adapter-owned; comes back on the next request
+}
+
+interface TokenUsage {
+  promptTokens: number;            // total input for the call, cached portion included
+  completionTokens: number;
+  cacheReadTokens?: number;        // part of promptTokens served from the cache
+  cacheWriteTokens?: number;       // part of promptTokens written to the cache
 }
 
 interface LLMToolCall {
@@ -110,7 +124,19 @@ export function myAdapter(config: { baseURL: string }): ModelAdapter {
         throw new Error(\`Provider error (\${res.status}): \${await res.text()}\`);
       }
 
-      return parseResponse(await res.json());
+      const data = await res.json();
+
+      return {
+        content: data.text ?? null,
+        toolCalls: toToolCalls(data),
+        usage: toUsage(data),
+        // Only 'max_tokens' and 'refusal' produce TRUNCATED and REFUSED, so a
+        // provider value left unmapped costs the caller those two codes.
+        stopReason: toStopReason(data.stop_reason),
+        // Handed back on the next request as message.providerData. Send it out
+        // again as-is instead of rebuilding the assistant turn from content.
+        providerData: data.content_blocks,
+      };
     },
   };
 }`;
@@ -148,8 +174,20 @@ const contractRows: [string, string][] = [
     "toolCallId maps to tool_call_id (OpenAI) or tool_use_id (Anthropic).",
   ],
   [
+    "Mark failed tool results",
+    "isError is set on every tool message that reports a failure back to the model: a denied call, arguments that failed validation, a handler that threw, a result that would not serialize, and a confirmation callback that rejected with anything other than an abort. Map it to the provider's own failure marker, is_error on an Anthropic tool_result block. OpenAI has none, so claudeAdapter reads the field and openAIAdapter ignores it.",
+  ],
+  [
     "Parse arguments",
     "JSON-parse the wire format into LLMToolCall.arguments, falling back to the raw string when the JSON is malformed.",
+  ],
+  [
+    "Report stopReason",
+    "Map the provider's finish or stop field onto StopReason. 'max_tokens' and 'refusal' are the only two values that produce the TRUNCATED and REFUSED error codes, so an adapter that leaves stopReason unset gives the caller no way to tell a cut-off answer from a finished one.",
+  ],
+  [
+    "Round-trip providerData",
+    "Two directions. Whatever the adapter returns on ModelResponse.providerData is copied onto the assistant ConversationMessage, and the adapter must read it back off incoming messages and replay it verbatim rather than rebuilding blocks from content and toolCalls. That is what keeps Anthropic thinking-block signatures intact. An adapter that needs nothing carried across turns leaves it undefined.",
   ],
   [
     "Throw on failure",
@@ -204,6 +242,20 @@ export default function Adapters() {
             <code>gpt-4o</code> and the default temperature is{" "}
             <code>0.2</code>. Both are overridable through the config.
           </p>
+          <p>
+            <code>temperature: null</code> leaves the field out of the request
+            entirely. Reasoning models reject any temperature but their own
+            default, so sending one at all fails the call, and{" "}
+            <code>null</code> is how you target them.{" "}
+            <code>undefined</code> still means the <code>0.2</code> default.
+          </p>
+          <p>
+            On the way back, <code>finish_reason</code> maps onto{" "}
+            <code>stopReason</code> and{" "}
+            <code>prompt_tokens_details.cached_tokens</code> onto{" "}
+            <code>usage.cacheReadTokens</code>. OpenAI reports no cache-write
+            count, so <code>cacheWriteTokens</code> stays undefined here.
+          </p>
         </Prose>
       </Section>
 
@@ -223,7 +275,34 @@ export default function Adapters() {
             <code>headers</code> are spread last and win over anything the
             adapter sets.
           </p>
+          <p>
+            Prompt caching is on by default. The system prompt goes out as a
+            text block carrying an ephemeral <code>cache_control</code>{" "}
+            breakpoint, and since tools and the system prompt both render ahead
+            of the messages, that one breakpoint caches them together. Pass{" "}
+            <code>cache: false</code> to send the system prompt as a plain
+            string, the way 0.2.x did.
+          </p>
+          <p>
+            Assistant replies come back with their raw content blocks on{" "}
+            <code>providerData</code>, and the adapter sends those blocks
+            straight back on the next request rather than rebuilding them.
+            Anthropic requires thinking blocks to return with their signatures
+            untouched, and this is what keeps them intact across turns. Failed
+            tool results go out with <code>is_error: true</code>, read from{" "}
+            <code>isError</code> on the tool message.
+          </p>
         </Prose>
+        <Callout tone="warn" title="promptTokens now counts cached tokens">
+          Anthropic reports cache reads and writes outside{" "}
+          <code>input_tokens</code>. As of 0.3.0 <code>promptTokens</code> is{" "}
+          <code>input_tokens</code> plus both cache counts, so it means the same
+          thing as OpenAI&apos;s{" "}
+          <code>prompt_tokens</code>, and a usage chart carried over from 0.2.x
+          will show higher Claude numbers for the same traffic.{" "}
+          <code>usage.cacheReadTokens</code> and{" "}
+          <code>usage.cacheWriteTokens</code> break out the two cached parts.
+        </Callout>
         <Callout tone="note" title="Calling Anthropic straight from a browser">
           Direct browser access additionally requires that provider&apos;s CORS
           opt-in header. Pass it through <code>headers</code>. The proxy pattern

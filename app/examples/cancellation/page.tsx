@@ -1,6 +1,7 @@
 "use client";
 
 import { AgentDemo } from "@/components/AgentDemo";
+import { CodeBlock } from "@/components/CodeBlock";
 import { Callout, Prose, NextLinks, Section } from "@/components/doc";
 import { ExampleShell } from "@/components/ExampleShell";
 import { callTool, say } from "@/lib/scriptedAdapter";
@@ -11,6 +12,8 @@ const CAN_ACCESS = ["user", "cart", "products", "currentPage"];
 const CAN_EXECUTE = ["navigateTo", "addToCart", "clearCart"];
 
 const SUGGESTIONS = ["Give me a rundown of my session"];
+
+const WAIT_SUGGESTIONS = ["Clear my cart", "Add the headphones"];
 
 /**
  * Deliberately wasteful: one key per turn, at 550ms a turn, so there is time to
@@ -36,6 +39,36 @@ const plan: Plan = (userMessage, state) => {
   ];
 };
 
+/**
+ * Two waits that belong to consumer code rather than to model latency: a
+ * confirmation nobody has answered, and a handler that is genuinely mid-flight.
+ * Both closing lines report only what the tool returned, so neither turn needs
+ * a state read the plan does not make.
+ */
+const waitPlan: Plan = (userMessage) => {
+  const text = userMessage.toLowerCase();
+
+  if (text.includes("clear")) {
+    return [
+      callTool("clearCart", {}, { id: "call_clear" }),
+      say("Cleared. Your cart is empty."),
+    ];
+  }
+
+  if (text.includes("headphones")) {
+    return [
+      callTool(
+        "addToCart",
+        { productId: "headphones-wireless-02" },
+        { id: "call_add_headphones" }
+      ),
+      say("Added the wireless headphones."),
+    ];
+  }
+
+  return [];
+};
+
 const source = `const controller = new AbortController();
 
 // Resolves. It does not throw, and it does not reject.
@@ -49,6 +82,39 @@ if (response.error?.code === "ABORTED") {
 
 // Elsewhere, on a button:
 controller.abort();
+`;
+
+const waitSource = `// A handler that forwards the signal stops when the interaction is cancelled.
+registerTool(
+  "addToCart",
+  async (args: { productId: string }, context?: ToolContext) => {
+    await fetch("/api/cart", {
+      method: "POST",
+      body: JSON.stringify(args),
+      signal: context?.signal,
+    });
+    return "Added to the cart";
+  },
+  { description: "Add one unit of a product to the cart by its id" }
+);
+
+// A confirmation card that closes itself when the cancel lands under it.
+onConfirm: (call) =>
+  new Promise((resolve) => {
+    const onAbort = () => {
+      setPending(null);
+      resolve(false);
+    };
+    call.signal?.addEventListener("abort", onAbort, { once: true });
+
+    setPending({
+      call,
+      resolve: (allowed) => {
+        call.signal?.removeEventListener("abort", onAbort);
+        resolve(allowed);
+      },
+    });
+  }),
 `;
 
 const next = [...guides, ...examples].filter((entry) =>
@@ -74,11 +140,12 @@ export default function CancellationExample() {
                 decision the caller made, not a failure the app has to report.
               </p>
               <p>
-                The loop checks the signal before each turn and again before
-                each tool call, so a cancel cannot leave a handler half-run. It
-                also forwards the signal to the adapter, which passes it to{" "}
-                <code>fetch</code>, so a real request is dropped in flight
-                rather than waited out.
+                The loop checks the signal before each turn and again before each
+                tool call, so a cancel that lands between two calls stops the next
+                one from starting. It also forwards the signal to the adapter,
+                which passes it to <code>fetch</code>, so a real request is
+                dropped in flight rather than waited out. A cancel that lands
+                while something is already waiting is the demo further down.
               </p>
               <p>
                 The interrupted turn is thrown away rather than kept for replay.
@@ -86,8 +153,11 @@ export default function CancellationExample() {
                 and the result answering it, and both OpenAI and Anthropic
                 reject a transcript in that shape, so the next{" "}
                 <code>send()</code> continues from the last clean state. The
-                empty bubble left in the transcript above is this demo showing
-                you a response whose <code>message</code> is an empty string.
+                bubble left in the transcript above has no text and a red{" "}
+                <code>ABORTED</code> line under it: that line is{" "}
+                <code>ConversationEntry.error</code>, which every assistant entry
+                carries, so the reason stays attached to the turn it belongs to
+                instead of being overwritten by the next successful send.
               </p>
               <p>
                 Token usage is still reported for the turns that completed
@@ -139,6 +209,90 @@ export default function CancellationExample() {
           />
         </div>
       </section>
+
+      <section className="mt-12">
+        <h2 className="text-xl font-bold text-neutral-900 dark:text-neutral-50">
+          Cancelling a wait that belongs to your code
+        </h2>
+        <p className="mt-3 text-neutral-600 dark:text-neutral-400">
+          The demo above only ever interrupts model latency. These two prompts
+          stop somewhere your own code is holding the loop open.{" "}
+          <strong className="font-semibold text-neutral-800 dark:text-neutral-200">
+            Clear my cart
+          </strong>{" "}
+          opens the amber approval card: press Cancel instead of answering it.{" "}
+          <strong className="font-semibold text-neutral-800 dark:text-neutral-200">
+            Add the headphones
+          </strong>{" "}
+          runs a handler that takes 1.8 seconds: press Cancel while it is
+          running.
+        </p>
+        <div className="mt-4">
+          <AgentDemo
+            plan={waitPlan}
+            suggestions={WAIT_SUGGESTIONS}
+            canAccess={CAN_ACCESS}
+            canExecute={CAN_EXECUTE}
+            cancellable
+            confirmMode="inline"
+            addToCartDelayMs={1800}
+          />
+        </div>
+      </section>
+
+      <Section title="What the abort ends">
+        <Prose>
+          <p>
+            Both prompts end the same way: the tool row reads{" "}
+            <code>cancelled</code> with the result{" "}
+            <code>Tool execution cancelled: interaction aborted</code>, and{" "}
+            <code>send()</code> resolves <code>ABORTED</code>. Denying the
+            approval card is a different row, with the result{" "}
+            <code>Tool execution cancelled by user</code>, because a denial is an
+            answer and a cancel is the absence of one.
+          </p>
+          <p>
+            The loop races the signal against the three awaits that can hang:{" "}
+            <code>onConfirm</code>, the tool handler, and the adapter call.
+            Before that race existed, an approval prompt that never answered left{" "}
+            <code>send()</code> pending forever, along with every call queued
+            behind it, and <code>isProcessing</code> never came back down. A
+            confirmation UI that unmounts with its provider is exactly that case.
+          </p>
+          <p>
+            The card dismissing itself is this page&apos;s code, not the
+            library&apos;s. <code>onConfirm</code> receives a{" "}
+            <code>PendingToolCall</code> carrying the interaction&apos;s{" "}
+            <code>signal</code>, and the demo listens to it. Without that
+            listener the interaction would still resolve <code>ABORTED</code>,
+            and the Allow and Deny buttons would sit there answering a question
+            the loop stopped asking.
+          </p>
+        </Prose>
+
+        <CodeBlock code={waitSource} lang="tsx" />
+
+        <Callout tone="warn" title="An abort ends the wait, not the work">
+          <p>
+            The race means a handler that ignores <code>context.signal</code>{" "}
+            stops blocking the interaction the moment you cancel. It does not
+            stop running. It finishes in the background and its result is thrown
+            away, so a write it was halfway through still lands. Forward the
+            signal into whatever the handler is waiting on if you need the work
+            itself to stop, the way <code>addToCart</code> does here.
+          </p>
+        </Callout>
+
+        <Prose>
+          <p>
+            The same applies to an unmount. The provider aborts in-flight and
+            queued interactions when it goes away, which runs every one of these
+            paths: the confirmation signal fires, handlers see an aborted{" "}
+            <code>context.signal</code>, <code>onError</code> stays quiet, and
+            each <code>send()</code> still settles.
+          </p>
+        </Prose>
+      </Section>
 
       <NextLinks entries={next} />
     </>
